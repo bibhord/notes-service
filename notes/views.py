@@ -6,10 +6,12 @@ from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
-from .models import Membership, Team
-from .permissions import IsTeamAdmin
+from .filters import NoteFilter
+from .models import Membership, Note, Team
+from .permissions import CanEditNote, IsTeamAdmin
 from .serializers import (
     MembershipSerializer,
+    NoteSerializer,
     RegisterSerializer,
     TeamSerializer,
     UserSerializer,
@@ -148,3 +150,69 @@ class MembershipDetailView(generics.DestroyAPIView):
                     "Removing this member would leave the team with no admin."
                 )
         instance.delete()
+
+
+class NoteListCreateView(generics.ListCreateAPIView):
+    """List notes the caller can see, newest first, or create one.
+
+    The queryset is visible_to(user) before any filter runs, so the filter
+    backends narrow an already-safe set rather than deciding access.
+    """
+
+    serializer_class = NoteSerializer
+    filterset_class = NoteFilter
+    ordering_fields = ["updated_at", "created_at", "title"]
+    ordering = ["-updated_at"]
+
+    def get_queryset(self):
+        return (
+            Note.objects.alive()
+            .visible_to(self.request.user)
+            .select_related("author", "team")
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+
+
+class NoteDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Read, edit or delete one note. DELETE is a soft delete."""
+
+    serializer_class = NoteSerializer
+    permission_classes = [permissions.IsAuthenticated, CanEditNote]
+
+    def get_queryset(self):
+        return (
+            Note.objects.alive()
+            .visible_to(self.request.user)
+            .select_related("author", "team")
+        )
+
+    def perform_destroy(self, instance):
+        instance.soft_delete()
+
+
+class NoteTrashView(generics.ListAPIView):
+    """Notes the caller deleted, so they can find one to restore."""
+
+    serializer_class = NoteSerializer
+    ordering = ["-deleted_at"]
+
+    def get_queryset(self):
+        return (
+            Note.objects.deleted()
+            .filter(author=self.request.user)
+            .select_related("author", "team")
+        )
+
+
+class NoteRestoreView(generics.GenericAPIView):
+    serializer_class = NoteSerializer
+
+    def get_queryset(self):
+        return Note.objects.deleted().filter(author=self.request.user)
+
+    def post(self, request, *args, **kwargs):
+        note = get_object_or_404(self.get_queryset(), pk=self.kwargs["pk"])
+        note.restore()
+        return Response(self.get_serializer(note).data, status=200)

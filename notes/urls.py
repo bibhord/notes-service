@@ -19,4 +19,12 @@ urlpatterns = [
         views.MembershipDetailView.as_view(),
         name="membership-detail",
     ),
+    path("notes/", views.NoteListCreateView.as_view(), name="note-list"),
+    path("notes/trash/", views.NoteTrashView.as_view(), name="note-trash"),
+    path("notes/<int:pk>/", views.NoteDetailView.as_view(), name="note-detail"),
+    path(
+        "notes/<int:pk>/restore/",
+        views.NoteRestoreView.as_view(),
+        name="note-restore",
+    ),
 ]

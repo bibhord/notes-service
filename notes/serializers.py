@@ -75,3 +75,61 @@ class TeamSerializer(serializers.ModelSerializer):
             None,
         )
         return membership.role if membership else None
+
+
+class NoteSerializer(serializers.ModelSerializer):
+    author = UserSerializer(read_only=True)
+    team = serializers.SlugRelatedField(
+        slug_field="slug",
+        queryset=Team.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = Note
+        fields = [
+            "id",
+            "title",
+            "body",
+            "visibility",
+            "team",
+            "author",
+            "created_at",
+            "updated_at",
+            "deleted_at",
+        ]
+        read_only_fields = ["id", "author", "created_at", "updated_at", "deleted_at"]
+
+    def validate(self, attrs):
+        """Keep visibility and team consistent, and refuse to post into a
+        team the caller is not on.
+
+        PATCH sends partial data, so each field falls back to the value
+        already on the instance rather than to a default.
+        """
+        instance = self.instance
+        visibility = attrs.get(
+            "visibility",
+            instance.visibility if instance else Note.Visibility.PRIVATE,
+        )
+        team = attrs.get("team", instance.team if instance else None)
+
+        if visibility == Note.Visibility.TEAM:
+            if team is None:
+                raise serializers.ValidationError(
+                    {"team": "A team note must specify a team."}
+                )
+            user = self.context["request"].user
+            if not Membership.objects.filter(team=team, user=user).exists():
+                raise serializers.ValidationError(
+                    {"team": "You are not a member of that team."}
+                )
+        elif team is not None:
+            raise serializers.ValidationError(
+                {"team": "A private note cannot belong to a team."}
+            )
+
+        attrs["visibility"] = visibility
+        attrs["team"] = team
+        return attrs
