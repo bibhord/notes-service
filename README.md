@@ -242,9 +242,13 @@ already here. I left it out rather than add a dependency for a take-home, but
 on a real service a hand-written endpoint table like the one above goes stale
 within a month.
 
-**Add: rate limiting and an audit log.** DRF throttling on the auth endpoints
-at minimum. For a shared workspace, "who deleted this and when" is a question
-people ask out loud.
+**Add: rate limiting, and finish the audit trail.** DRF throttling on the auth
+endpoints at minimum. Revisions answer "who changed this text and when", but
+nothing else is recorded: `deleted_at` has no `deleted_by`, so when a team
+admin removes a member's note there is no record of who did it, and purges and
+membership changes leave no trace at all. For a shared workspace those are the
+questions people ask out loud. The shape is a small append-only event table
+rather than more columns on `Note`.
 
 **Change: token auth.** Tokens here never expire, which is fine for a
 take-home and wrong for production. The reason I chose DRF tokens over JWT is
@@ -287,7 +291,7 @@ every verb return?
 
 - Private notes stay invisible to everyone but the author, across list, read, edit, delete and search
 - Team members can read and edit shared notes, but only the author or a team admin can delete one
-- Removing someone from a team revokes their access on the next request
+- Removing someone from a team revokes their access to other people's notes in it on the next request
 - You cannot post a note into a team you are not on, or move your own note into one
 - Visibility and team must agree, in both directions
 - A team cannot be left without an admin
