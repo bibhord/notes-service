@@ -231,3 +231,76 @@ class VisibilityTransitionTests(APITestCase):
             **if_match(note),
         )
         self.assertEqual(client_for(grace).get(reverse("note-detail", args=[note.pk])).status_code, 404)
+
+
+class ResharingIsAuthorOnlyTests(APITestCase):
+    """Editing a shared note is collaborative. Re-pointing it is not.
+
+    These cover a hole found in review: a plain team member could move
+    another person's note into an unrelated team they belonged to, or flip
+    it to private, cutting the real team off. Both returned 200.
+    """
+
+    def setUp(self):
+        self.ada = make_user("ada")
+        self.grace = make_user("grace")
+        self.shared = make_team("One", admin=self.ada, members=[self.grace])
+        # Grace belongs to a second team that ada has nothing to do with.
+        self.graces_other_team = make_team("Two", admin=self.grace)
+        self.note = make_note(self.ada, title="Ada's note", team=self.shared)
+        self.url = reverse("note-detail", args=[self.note.pk])
+
+    def test_member_cannot_move_the_note_to_another_team(self):
+        response = client_for(self.grace).patch(
+            self.url,
+            {"visibility": "team", "team": self.graces_other_team.slug},
+            **if_match(self.note),
+        )
+        self.assertEqual(response.status_code, 403)
+
+        self.note.refresh_from_db()
+        self.assertEqual(self.note.team, self.shared)
+
+    def test_member_cannot_unshare_the_note(self):
+        response = client_for(self.grace).patch(
+            self.url, {"visibility": "private"}, **if_match(self.note)
+        )
+        self.assertEqual(response.status_code, 403)
+
+        self.note.refresh_from_db()
+        self.assertEqual(self.note.visibility, Note.Visibility.TEAM)
+        self.assertEqual(self.note.team, self.shared)
+
+    def test_team_admin_cannot_reshare_someone_elses_note_either(self):
+        """Admin rights cover removing a note, not redirecting it."""
+        graces_note = make_note(self.grace, title="Grace's", team=self.shared)
+        response = client_for(self.ada).patch(
+            reverse("note-detail", args=[graces_note.pk]),
+            {"visibility": "private"},
+            **if_match(graces_note),
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_member_can_still_edit_the_text(self):
+        """The collaborative part must keep working."""
+        response = client_for(self.grace).patch(
+            self.url,
+            {"title": "Ada's note", "body": "grace fixed a typo"},
+            **if_match(self.note),
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_sending_the_unchanged_visibility_is_not_treated_as_a_change(self):
+        """A client that PATCHes the whole object must not trip the check."""
+        response = client_for(self.grace).patch(
+            self.url,
+            {"body": "edited", "visibility": "team", "team": self.shared.slug},
+            **if_match(self.note),
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_author_can_still_reshare_their_own_note(self):
+        response = client_for(self.ada).patch(
+            self.url, {"visibility": "private"}, **if_match(self.note)
+        )
+        self.assertEqual(response.status_code, 200)

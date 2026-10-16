@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 
 from .models import Membership, Note, NoteRevision, Team
 
@@ -134,12 +135,26 @@ class NoteSerializer(serializers.ModelSerializer):
         ):
             team = None
 
+        user = self.context["request"].user
+
+        # Who can see a note is the author's call, not the team's.
+        #
+        # Editing a shared note is collaborative -- any team member can fix
+        # the text. Re-pointing it is not. Without this check a plain member
+        # could move someone else's note into an unrelated team they happen
+        # to belong to, exposing it to people the author has no relationship
+        # with, or flip it to private and cut the real team off.
+        if instance is not None and user.id != instance.author_id:
+            if visibility != instance.visibility or team != instance.team:
+                raise PermissionDenied(
+                    "Only the author can change who a note is shared with."
+                )
+
         if visibility == Note.Visibility.TEAM:
             if team is None:
                 raise serializers.ValidationError(
                     {"team": "A team note must specify a team."}
                 )
-            user = self.context["request"].user
             if not Membership.objects.filter(team=team, user=user).exists():
                 raise serializers.ValidationError(
                     {"team": "You are not a member of that team."}

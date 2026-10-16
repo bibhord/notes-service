@@ -1,3 +1,7 @@
 Django==5.1.15
 djangorestframework==3.17.2
 django-filter==25.1
+# Only needed when DATABASE_URL points at Postgres; the SQLite default
+# does not use it. Installed unconditionally so `docker compose up`,
+# which does set DATABASE_URL, works on a clean checkout.
+psycopg[binary]==3.2.3

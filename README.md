@@ -84,6 +84,15 @@ Writes are a separate question and are handled by `CanEditNote`. By the time
 a request reaches it the caller can already see the note, so the only thing
 left to decide is whether they may change it.
 
+There are two kinds of change, and they do not carry the same rights.
+Editing the *text* of a shared note is collaborative — any team member can
+fix a typo, because a shared note only the author can correct is not really
+shared. Changing *who can see it* is the author's call alone. A review of
+this code found that I had originally conflated the two, which let a plain
+member move someone else's note into an unrelated team they belonged to,
+exposing it to people the author had never shared with. Six tests in
+`ResharingIsAuthorOnlyTests` now pin that down.
+
 ### 2. How sharing is modelled
 
 A note has a `visibility` of `private` or `team`, plus a nullable FK to one
@@ -268,6 +277,7 @@ what does every verb return?
 - You cannot post a note into a team you are not on, or move your own note into one
 - Visibility and team must agree, in both directions
 - A team cannot be left without an admin
+- Only the author can re-share or un-share a note; members can still edit its text
 
 `notes/tests/test_concurrency.py` interleaves two clients on one note and
 asserts the second write is refused rather than winning, that the conflict
