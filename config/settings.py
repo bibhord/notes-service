@@ -27,6 +27,7 @@ ALLOWED_HOSTS = [h for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",
 INSTALLED_APPS = [
     "django.contrib.auth",
     "django.contrib.contenttypes",
+    "django.contrib.staticfiles",
     "rest_framework",
     "rest_framework.authtoken",
     "django_filters",
@@ -38,9 +39,26 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
 ]
 
+STATIC_URL = "static/"
+
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
-TEMPLATES = []
+
+# Needed by DRF's browsable API, which renders HTML templates. Without a
+# configured engine every request with `Accept: text/html` -- that is,
+# every request from a browser -- returns a 500.
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+            ]
+        },
+    }
+]
 
 
 def database_from_url(url: str) -> dict:
