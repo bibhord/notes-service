@@ -264,9 +264,16 @@ which is who can see what.
 make test
 ```
 
-44 tests. The ones worth reading are in `notes/tests/test_permissions.py` —
-they are written from the attacker's side: given a note I should not have,
-what does every verb return?
+89 tests, green on SQLite and on Postgres:
+
+```bash
+docker compose up --build -d
+docker compose exec api python manage.py test
+```
+
+The ones worth reading are in `notes/tests/test_permissions.py` — they are
+written from the attacker's side: given a note I should not have, what does
+every verb return?
 
 - Private notes stay invisible to everyone but the author, across list, read, edit, delete and search
 - Team members can read and edit shared notes, but only the author or a team admin can delete one
