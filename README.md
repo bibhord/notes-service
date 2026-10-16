@@ -86,14 +86,20 @@ Writes are a separate question and are handled by `CanEditNote`. By the time
 a request reaches it the caller can already see the note, so the only thing
 left to decide is whether they may change it.
 
-There are two kinds of change, and they do not carry the same rights.
-Editing the *text* of a shared note is collaborative — any team member can
-fix a typo, because a shared note only the author can correct is not really
-shared. Changing *who can see it* is the author's call alone. A review of
-this code found that I had originally conflated the two, which let a plain
-member move someone else's note into an unrelated team they belonged to,
-exposing it to people the author had never shared with. Six tests in
-`ResharingIsAuthorOnlyTests` now pin that down.
+There are two kinds of change, and treating them as one permission is a
+mistake worth being explicit about. Editing the *text* of a shared note is
+collaborative — any team member can fix a typo, because a shared note only the
+author can correct is not really shared. Changing *who can see it* is the
+author's alone, including against team admins, whose rights cover removing a
+note from the team rather than redirecting it.
+
+The reason to separate them is that most people belong to more than one team.
+If "can edit" also meant "can re-point", any member could move a colleague's
+note into an unrelated team they happen to belong to, handing it to people the
+author has no relationship with — and a leak like that reads as a successful
+edit from both ends. Six tests in `ResharingIsAuthorOnlyTests` hold the line,
+including one checking that a client sending back the unchanged visibility is
+not mistaken for an attempt to change it.
 
 ### 2. How sharing is modelled
 
@@ -162,9 +168,9 @@ moved, or purged by someone entitled to, before the team goes. That keeps the
 decision with the people whose notes they are rather than with whoever happens
 to be a team admin today.
 
-**Concurrent edits are detected, not resolved by luck.** Two teammates saving
-the same note used to mean the second write won and the first change vanished
-silently:
+**Concurrent edits are detected, not resolved by luck.** With a plain
+`UPDATE`, two teammates saving the same note means the second write wins and
+the first change vanishes silently:
 
 ```
 ada    GET   note 5  -> "milk"

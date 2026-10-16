@@ -146,10 +146,11 @@ class Note(models.Model):
     )
     team = models.ForeignKey(
         Team,
-        # PROTECT, not CASCADE. Deleting a team used to hard-delete every
-        # note in it, including other people's, with no undo -- which flatly
-        # contradicts the rest of this service never destroying a note. The
-        # database now refuses, and the API turns that into a 409.
+        # PROTECT, not CASCADE. Cascading would let one team admin
+        # hard-delete every note in the team, including other people's,
+        # with no undo -- which contradicts the rest of this service, where
+        # nothing is destroyed by a single action. The database refuses,
+        # and the API turns that into a 409.
         on_delete=models.PROTECT,
         related_name="notes",
         null=True,
