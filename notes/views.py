@@ -63,6 +63,9 @@ class TeamListCreateView(generics.ListCreateAPIView):
                     queryset=Membership.objects.filter(user=self.request.user),
                 )
             )
+            # annotate() introduces a GROUP BY, which drops Meta.ordering and
+            # makes pagination non-deterministic. Order explicitly.
+            .order_by("name")
         )
 
     def perform_create(self, serializer):
@@ -82,6 +85,7 @@ class TeamDetailView(generics.RetrieveUpdateDestroyAPIView):
             Team.objects.filter(memberships__user=self.request.user)
             .annotate(member_count=Count("memberships", distinct=True))
             .prefetch_related("memberships")
+            .order_by("name")
         )
 
 
