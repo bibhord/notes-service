@@ -1,9 +1,13 @@
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import models
-from django.db.models import Q
+from django.db import models, transaction
+from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.text import slugify
+
+
+class VersionConflict(Exception):
+    """Raised when an update targets a version that is no longer current."""
 
 
 class Team(models.Model):
@@ -141,6 +145,10 @@ class Note(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
 
+    # Bumped on every write. Clients send the version they last read and
+    # the update only lands if it still matches -- see apply_update().
+    version = models.PositiveIntegerField(default=1)
+
     objects = NoteQuerySet.as_manager()
 
     class Meta:
@@ -189,3 +197,75 @@ class Note(models.Model):
         if self.deleted_at is not None:
             self.deleted_at = None
             self.save(update_fields=["deleted_at"])
+
+    @transaction.atomic
+    def apply_update(self, *, editor, expected_version=None, **fields):
+        """Write changes, refusing to clobber a concurrent edit.
+
+        The guard is a single conditional UPDATE -- the version is matched
+        and incremented in the same statement -- so there is no window
+        between checking and writing for another writer to slip into.
+
+        `expected_version=None` skips the check and takes the last-writer-
+        wins behaviour. The view decides when that is acceptable.
+        """
+        rows = Note.objects.filter(pk=self.pk)
+        if expected_version is not None:
+            rows = rows.filter(version=expected_version)
+
+        changed = rows.update(
+            version=F("version") + 1,
+            updated_at=timezone.now(),
+            **fields,
+        )
+        if changed == 0:
+            raise VersionConflict(
+                f"This note has changed since version {expected_version}."
+            )
+
+        self.refresh_from_db()
+        self.record_revision(editor)
+        return self
+
+    def record_revision(self, editor) -> "NoteRevision":
+        """Snapshot the current state. Called after every successful write."""
+        return NoteRevision.objects.create(
+            note=self,
+            edited_by=editor,
+            title=self.title,
+            body=self.body,
+            version=self.version,
+        )
+
+
+class NoteRevision(models.Model):
+    """One row per save, so a lost edit is recoverable and "who changed
+    this" is answerable.
+
+    Full snapshots rather than diffs: note bodies are small, and storing
+    the whole text means reading any revision is one row with no replay.
+    """
+
+    note = models.ForeignKey(Note, on_delete=models.CASCADE, related_name="revisions")
+    edited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="note_revisions",
+    )
+    title = models.CharField(max_length=200)
+    body = models.TextField(blank=True)
+    version = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-version"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["note", "version"], name="unique_revision_per_version"
+            )
+        ]
+        indexes = [models.Index(fields=["note", "-version"])]
+
+    def __str__(self) -> str:
+        return f"{self.note_id} v{self.version}"

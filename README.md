@@ -46,6 +46,7 @@ All endpoints except register and token require `Authorization: Token <key>`.
 | DELETE | `/api/teams/{slug}/members/{username}/` | Remove a member (admin-only) |
 | GET, POST | `/api/notes/` | Notes you can see / create one |
 | GET, PATCH, DELETE | `/api/notes/{id}/` | One note (DELETE is a soft delete) |
+| GET | `/api/notes/{id}/revisions/` | Every saved version of a note |
 | GET | `/api/notes/trash/` | Notes you deleted |
 | POST | `/api/notes/{id}/restore/` | Undelete |
 
@@ -130,6 +131,62 @@ deleted record and cannot work out why your query returns nothing. Instead
 `Note.objects` returns everything and callers say `.alive()` or `.deleted()`.
 Slightly more typing, no surprises.
 
+### 4. Two people editing the same note
+
+Notes are shared, so two teammates will eventually save the same note at
+the same time. With a plain `UPDATE` the second write wins and the first
+person's change is gone, with no error and nothing in the logs:
+
+```
+ada    GET   note 5  -> "milk"
+grace  GET   note 5  -> "milk"
+ada    PATCH "milk\nbread"    -> 200
+grace  PATCH "milk\ncoffee"   -> 200    (bread is gone, silently)
+```
+
+Each note carries an integer `version`, served as an `ETag`. A write sends
+back the version it last read in `If-Match`, and the update is a single
+conditional statement:
+
+```python
+rows = Note.objects.filter(pk=self.pk, version=expected_version).update(
+    version=F("version") + 1, updated_at=timezone.now(), **fields
+)
+if rows == 0:
+    raise VersionConflict(...)
+```
+
+Matching and incrementing in one statement is the whole point. A `SELECT`
+followed by an `UPDATE` leaves a window for another writer to land in
+between; this has no window.
+
+Three decisions inside that:
+
+**An integer, not `updated_at`.** Timestamps have precision limits, clocks
+can move backwards, and two writes in the same microsecond compare equal.
+A counter has none of those problems. `ETag` / `If-Match` is just the
+standard HTTP spelling of it.
+
+**Shared notes require the precondition; private ones do not.** A blind
+write to a team note returns **428 Precondition Required**. Making every
+client read before every write costs a round trip and buys nothing on a
+note only one person can reach, so the requirement starts exactly where
+concurrent editors become possible. You can still opt in on a private
+note, and it is honoured.
+
+**The 409 carries the current state.** A bare rejection makes the user
+retype from memory, so the response includes `your_version`,
+`current_version` and the full current note, which is enough for a client
+to show a diff. That is also why every save writes a `NoteRevision` row:
+without history, a conflict response has nothing to merge against and an
+overwritten paragraph is simply gone.
+
+What this deliberately does not do is let two people type into one note
+simultaneously. That needs operational transforms or a CRDT, a persistent
+connection, and a different storage model for the body. For a team
+note-taking app, conflict detection plus history is the right stopping
+point.
+
 ---
 
 ## What I would change, add, or stop doing with more time
@@ -142,10 +199,11 @@ I kept LIKE because the point of this exercise was the sharing and
 authorization model, and a full-text setup would have been the most code for
 the least insight.
 
-**Add: note history.** Shared editing with no revision log means two people on
-one note can silently overwrite each other. The fix is a `NoteRevision` row per
-save and optimistic concurrency via an `updated_at` precondition on PATCH. This
-is the gap I am least comfortable leaving.
+**Add: a merge UI, and revision pruning.** The API now detects conflicts and
+keeps history, but it hands the client two versions and no help. A real product
+shows a three-way diff. Revisions also grow without bound; they want a
+retention policy, or collapsing successive edits by the same author inside a
+short window into one.
 
 **Add: an OpenAPI schema.** `drf-spectacular` would generate it from what is
 already here. I left it out rather than add a dependency for a take-home, but
@@ -194,6 +252,11 @@ what does every verb return?
 - You cannot post a note into a team you are not on, or move your own note into one
 - Visibility and team must agree, in both directions
 - A team cannot be left without an admin
+
+`notes/tests/test_concurrency.py` interleaves two clients on one note and
+asserts the second write is refused rather than winning, that the conflict
+response carries enough to merge against, that a rejected write leaves no
+revision, and that an overwritten edit is still recoverable from history.
 
 The rest cover registration, token auth, CRUD, validation, soft delete and
 restore, search, filtering and pagination.

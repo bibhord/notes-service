@@ -14,6 +14,13 @@ from notes.models import Membership, Note
 from .factories import client_for, make_note, make_team, make_user
 
 
+def if_match(note):
+    """Shared notes require the version you last read. Tests that are not
+    about concurrency just send the current one."""
+    note.refresh_from_db()
+    return {"HTTP_IF_MATCH": f'"{note.version}"'}
+
+
 class PrivateNoteIsolationTests(APITestCase):
     def setUp(self):
         self.ada = make_user("ada")
@@ -66,7 +73,9 @@ class TeamSharingTests(APITestCase):
 
     def test_team_member_can_edit_a_shared_note(self):
         response = client_for(self.grace).patch(
-            reverse("note-detail", args=[self.note.pk]), {"body": "updated steps"}
+            reverse("note-detail", args=[self.note.pk]),
+            {"body": "updated steps"},
+            **if_match(self.note),
         )
         self.assertEqual(response.status_code, 200)
 
@@ -164,7 +173,9 @@ class VisibilityTransitionTests(APITestCase):
         """'Make this private' is unambiguous and should just work."""
         note = self._shared_note()
         response = self.client.patch(
-            reverse("note-detail", args=[note.pk]), {"visibility": "private"}
+            reverse("note-detail", args=[note.pk]),
+            {"visibility": "private"},
+            **if_match(note),
         )
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.data["team"])
@@ -179,6 +190,7 @@ class VisibilityTransitionTests(APITestCase):
         response = self.client.patch(
             reverse("note-detail", args=[note.pk]),
             {"visibility": "private", "team": self.team.slug},
+            **if_match(note),
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("team", response.data)
@@ -195,7 +207,12 @@ class VisibilityTransitionTests(APITestCase):
         note = self._shared_note()
         url = reverse("note-detail", args=[note.pk])
 
-        self.assertEqual(self.client.patch(url, {"visibility": "private"}).status_code, 200)
+        self.assertEqual(
+            self.client.patch(
+                url, {"visibility": "private"}, **if_match(note)
+            ).status_code,
+            200,
+        )
         reshared = self.client.patch(
             url, {"visibility": "team", "team": self.team.slug}
         )
@@ -208,5 +225,9 @@ class VisibilityTransitionTests(APITestCase):
         note = self._shared_note()
 
         self.assertEqual(client_for(grace).get(reverse("note-detail", args=[note.pk])).status_code, 200)
-        self.client.patch(reverse("note-detail", args=[note.pk]), {"visibility": "private"})
+        self.client.patch(
+            reverse("note-detail", args=[note.pk]),
+            {"visibility": "private"},
+            **if_match(note),
+        )
         self.assertEqual(client_for(grace).get(reverse("note-detail", args=[note.pk])).status_code, 404)

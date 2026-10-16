@@ -2,7 +2,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
-from .models import Membership, Note, Team
+from .models import Membership, Note, NoteRevision, Team
 
 User = get_user_model()
 
@@ -98,8 +98,16 @@ class NoteSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "deleted_at",
+            "version",
         ]
-        read_only_fields = ["id", "author", "created_at", "updated_at", "deleted_at"]
+        read_only_fields = [
+            "id",
+            "author",
+            "created_at",
+            "updated_at",
+            "deleted_at",
+            "version",
+        ]
 
     def validate(self, attrs):
         """Keep visibility and team consistent, and refuse to post into a
@@ -144,3 +152,12 @@ class NoteSerializer(serializers.ModelSerializer):
         attrs["visibility"] = visibility
         attrs["team"] = team
         return attrs
+
+
+class NoteRevisionSerializer(serializers.ModelSerializer):
+    edited_by = UserSerializer(read_only=True)
+
+    class Meta:
+        model = NoteRevision
+        fields = ["id", "version", "title", "body", "edited_by", "created_at"]
+        read_only_fields = fields

@@ -6,11 +6,13 @@ from rest_framework.authtoken.models import Token
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
+from .concurrency import etag_for, expected_version_for
 from .filters import NoteFilter
-from .models import Membership, Note, Team
+from .models import Membership, Note, NoteRevision, Team, VersionConflict
 from .permissions import CanEditNote, IsTeamAdmin
 from .serializers import (
     MembershipSerializer,
+    NoteRevisionSerializer,
     NoteSerializer,
     RegisterSerializer,
     TeamSerializer,
@@ -176,7 +178,10 @@ class NoteListCreateView(generics.ListCreateAPIView):
         )
 
     def perform_create(self, serializer):
-        serializer.save(author=self.request.user)
+        note = serializer.save(author=self.request.user)
+        # Revision 1 is the note as created, so history is complete rather
+        # than starting at the first edit.
+        note.record_revision(self.request.user)
 
 
 class NoteDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -191,6 +196,55 @@ class NoteDetailView(generics.RetrieveUpdateDestroyAPIView):
             .visible_to(self.request.user)
             .select_related("author", "team")
         )
+
+    def retrieve(self, request, *args, **kwargs):
+        """Return the note, with its version as an ETag so the client has
+        something to send back on the next write."""
+        instance = self.get_object()
+        response = Response(self.get_serializer(instance).data)
+        response["ETag"] = etag_for(instance)
+        return response
+
+    def update(self, request, *args, **kwargs):
+        """Apply a change, refusing to overwrite a concurrent edit.
+
+        DRF's default would call serializer.save(), which issues an
+        unconditional UPDATE. Writing it out here lets the version check
+        and the write happen in one statement.
+        """
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+
+        expected = expected_version_for(request, instance)
+
+        try:
+            note = instance.apply_update(
+                editor=request.user,
+                expected_version=expected,
+                **serializer.validated_data,
+            )
+        except VersionConflict:
+            instance.refresh_from_db()
+            return Response(
+                {
+                    "detail": (
+                        "This note was changed by someone else while you were "
+                        "editing it. Your change was not applied."
+                    ),
+                    "your_version": expected,
+                    "current_version": instance.version,
+                    "current": self.get_serializer(instance).data,
+                },
+                status=409,
+                headers={"ETag": etag_for(instance)},
+            )
+
+        response = Response(self.get_serializer(note).data)
+        response["ETag"] = etag_for(note)
+        return response
 
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -220,3 +274,20 @@ class NoteRestoreView(generics.GenericAPIView):
         note = get_object_or_404(self.get_queryset(), pk=self.kwargs["pk"])
         note.restore()
         return Response(self.get_serializer(note).data, status=200)
+
+
+class NoteRevisionListView(generics.ListAPIView):
+    """Every saved version of a note, newest first.
+
+    Scoped through the same visible_to() queryset as the note itself, so
+    history cannot be read by anyone who cannot read the note.
+    """
+
+    serializer_class = NoteRevisionSerializer
+
+    def get_queryset(self):
+        note = get_object_or_404(
+            Note.objects.alive().visible_to(self.request.user),
+            pk=self.kwargs["pk"],
+        )
+        return NoteRevision.objects.filter(note=note).select_related("edited_by")

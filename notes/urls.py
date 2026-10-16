@@ -23,6 +23,11 @@ urlpatterns = [
     path("notes/trash/", views.NoteTrashView.as_view(), name="note-trash"),
     path("notes/<int:pk>/", views.NoteDetailView.as_view(), name="note-detail"),
     path(
+        "notes/<int:pk>/revisions/",
+        views.NoteRevisionListView.as_view(),
+        name="note-revisions",
+    ),
+    path(
         "notes/<int:pk>/restore/",
         views.NoteRestoreView.as_view(),
         name="note-restore",
