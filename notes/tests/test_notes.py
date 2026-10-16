@@ -175,3 +175,63 @@ class AdminRestoreTests(APITestCase):
             reverse("note-restore", args=[self.note.pk])
         )
         self.assertEqual(response.status_code, 404)
+
+
+class PurgeTests(APITestCase):
+    """Permanent deletion, and the reason it exists: without it a team
+    that ever held a note could never be deleted."""
+
+    def setUp(self):
+        self.ada = make_user("ada")
+        self.grace = make_user("grace")
+        self.team = make_team("One", admin=self.ada, members=[self.grace])
+        self.note = make_note(self.grace, title="Grace's", team=self.team)
+        self.note.record_revision(self.grace)
+        self.url = reverse("note-purge", args=[self.note.pk])
+
+    def test_author_can_purge_their_own_trashed_note(self):
+        self.note.soft_delete()
+        response = client_for(self.grace).delete(self.url)
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Note.objects.filter(pk=self.note.pk).exists())
+
+    def test_a_live_note_cannot_be_purged(self):
+        """Trash it first. Permanent loss is never one step."""
+        response = client_for(self.grace).delete(self.url)
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(Note.objects.filter(pk=self.note.pk).exists())
+
+    def test_team_admin_can_purge_a_members_trashed_note(self):
+        self.note.soft_delete()
+        self.assertEqual(client_for(self.ada).delete(self.url).status_code, 204)
+
+    def test_a_plain_member_cannot_purge_someone_elses_note(self):
+        self.note.soft_delete()
+        mallory = make_user("mallory")
+        Membership.objects.create(team=self.team, user=mallory)
+        self.assertEqual(client_for(mallory).delete(self.url).status_code, 404)
+
+    def test_an_outsider_cannot_purge(self):
+        self.note.soft_delete()
+        self.assertEqual(
+            client_for(make_user("outsider")).delete(self.url).status_code, 404
+        )
+
+    def test_purging_takes_the_revisions_with_it(self):
+        from notes.models import NoteRevision
+
+        self.note.soft_delete()
+        self.assertTrue(NoteRevision.objects.filter(note=self.note).exists())
+
+        client_for(self.grace).delete(self.url)
+        self.assertFalse(NoteRevision.objects.filter(note_id=self.note.pk).exists())
+
+    def test_emptying_the_trash_unblocks_deleting_the_team(self):
+        """The whole point. Before purge existed this was a dead end."""
+        self.note.soft_delete()
+        admin = client_for(self.ada)
+        team_url = reverse("team-detail", args=[self.team.slug])
+
+        self.assertEqual(admin.delete(team_url).status_code, 409)
+        self.assertEqual(admin.delete(self.url).status_code, 204)
+        self.assertEqual(admin.delete(team_url).status_code, 204)

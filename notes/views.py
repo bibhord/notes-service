@@ -338,6 +338,29 @@ class NoteRestoreView(generics.GenericAPIView):
         return Response(self.get_serializer(note).data, status=200)
 
 
+class NotePurgeView(generics.DestroyAPIView):
+    """Destroy a note for real, revisions and all.
+
+    Only works on a note that is already in the trash, which makes
+    permanent loss a deliberate second action rather than a side effect
+    of the first. Scoped the same way as restore -- author or team admin
+    -- because whoever can put a note back is who should be able to
+    decide it is not coming back.
+
+    Without this a team that ever held a note could never be deleted,
+    since trashed notes block team deletion and nothing emptied the
+    trash.
+    """
+
+    serializer_class = NoteSerializer
+
+    def get_queryset(self):
+        return Note.objects.deleted().manageable_by(self.request.user)
+
+    def get_object(self):
+        return get_object_or_404(self.get_queryset(), pk=self.kwargs["pk"])
+
+
 class NoteRevisionListView(generics.ListAPIView):
     """Every saved version of a note, newest first.
 

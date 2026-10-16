@@ -50,6 +50,7 @@ All endpoints except register and token require `Authorization: Token <key>`.
 | GET | `/api/notes/{id}/revisions/` | Every saved version of a note |
 | GET | `/api/notes/trash/` | Notes you deleted |
 | POST | `/api/notes/{id}/restore/` | Undelete |
+| DELETE | `/api/notes/{id}/purge/` | Destroy a trashed note for good |
 
 Listing notes supports `?q=`, `?team=`, `?author=`, `?visibility=`,
 `?updated_after=`, `?ordering=`, `?page=` and `?page_size=`.
@@ -140,6 +141,12 @@ than authorship — a team admin can delete a member's note, so they can also
 restore it. Being able to remove something you cannot put back is not a useful
 power.
 
+Permanent deletion exists, but only as a second step: `DELETE
+/api/notes/{id}/purge/` works on a note that is already in the trash, and is
+scoped the same way as restore. Whoever can put a note back is who should be
+able to decide it is not coming back. Nothing is ever destroyed by a single
+action, and purging takes the note's revisions with it.
+
 What I deliberately did **not** do is make the default manager hide deleted
 rows. That trick is convenient right up to the first time you need to find a
 deleted record and cannot work out why your query returns nothing. `Note.objects`
@@ -150,7 +157,10 @@ returns everything; callers say `.alive()` or `.deleted()`.
 including other people's, with no undo — the exact thing the rest of this
 design refuses to do. The API returns **409** naming how many notes are in the
 way. A note in the trash still blocks it, because it is recoverable and
-deleting the team would end that.
+deleting the team would end that — so clearing a team means its notes are
+moved, or purged by someone entitled to, before the team goes. That keeps the
+decision with the people whose notes they are rather than with whoever happens
+to be a team admin today.
 
 **Concurrent edits are detected, not resolved by luck.** Two teammates saving
 the same note used to mean the second write won and the first change vanished
@@ -264,7 +274,7 @@ which is who can see what.
 make test
 ```
 
-89 tests, green on SQLite and on Postgres:
+96 tests, green on SQLite and on Postgres:
 
 ```bash
 docker compose up --build -d
@@ -283,6 +293,7 @@ every verb return?
 - A team cannot be left without an admin
 - Only the author can re-share or un-share a note; members can still edit its text
 - Deleting a team holding notes is refused, rather than destroying them
+- A note can only be purged once it is in the trash, and only by someone who could restore it
 - Someone removed from a team keeps their own notes readable *and* editable
 - Anyone can leave a team, except the last admin, who would strand it
 

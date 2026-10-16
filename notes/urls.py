@@ -28,6 +28,11 @@ urlpatterns = [
         name="note-revisions",
     ),
     path(
+        "notes/<int:pk>/purge/",
+        views.NotePurgeView.as_view(),
+        name="note-purge",
+    ),
+    path(
         "notes/<int:pk>/restore/",
         views.NoteRestoreView.as_view(),
         name="note-restore",
