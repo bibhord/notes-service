@@ -2,6 +2,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
+from .models import Membership, Note, Team
+
 User = get_user_model()
 
 
@@ -25,3 +27,51 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         return User.objects.create_user(**validated_data)
+
+
+class MembershipSerializer(serializers.ModelSerializer):
+    user = UserSerializer(read_only=True)
+    username = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = Membership
+        fields = ["id", "user", "username", "role", "joined_at"]
+        read_only_fields = ["id", "user", "joined_at"]
+
+    def validate_username(self, value):
+        try:
+            self._user = User.objects.get(username=value)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("No user with that username.")
+        return value
+
+    def create(self, validated_data):
+        validated_data.pop("username")
+        team = self.context["team"]
+        membership, created = Membership.objects.get_or_create(
+            team=team,
+            user=self._user,
+            defaults={"role": validated_data.get("role", Membership.Role.MEMBER)},
+        )
+        if not created:
+            raise serializers.ValidationError(
+                {"username": "That user is already on this team."}
+            )
+        return membership
+
+
+class TeamSerializer(serializers.ModelSerializer):
+    member_count = serializers.IntegerField(read_only=True)
+    my_role = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Team
+        fields = ["id", "name", "slug", "created_at", "member_count", "my_role"]
+        read_only_fields = ["id", "slug", "created_at", "member_count", "my_role"]
+
+    def get_my_role(self, obj) -> str | None:
+        membership = next(
+            (m for m in obj.memberships.all() if m.user_id == self.context["request"].user.id),
+            None,
+        )
+        return membership.role if membership else None
