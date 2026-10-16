@@ -115,6 +115,17 @@ class NoteSerializer(serializers.ModelSerializer):
         )
         team = attrs.get("team", instance.team if instance else None)
 
+        # Un-sharing: "make this private" is unambiguous, so clear the team
+        # rather than rejecting the request for still having one. Only do
+        # this when the caller said `private` explicitly and said nothing
+        # about the team -- passing both private and a team is a real
+        # contradiction and still fails below.
+        if (
+            attrs.get("visibility") == Note.Visibility.PRIVATE
+            and "team" not in attrs
+        ):
+            team = None
+
         if visibility == Note.Visibility.TEAM:
             if team is None:
                 raise serializers.ValidationError(

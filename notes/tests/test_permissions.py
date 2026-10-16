@@ -147,3 +147,66 @@ class VisibilityConsistencyTests(APITestCase):
         note.refresh_from_db()
         self.assertEqual(note.visibility, Note.Visibility.TEAM)
         self.assertEqual(note.team, self.team)
+
+
+class VisibilityTransitionTests(APITestCase):
+    """Moving a note between private and team after it already exists."""
+
+    def setUp(self):
+        self.ada = make_user("ada")
+        self.client = client_for(self.ada)
+        self.team = make_team("Platform", admin=self.ada)
+
+    def _shared_note(self):
+        return make_note(self.ada, title="Runbook", team=self.team)
+
+    def test_setting_private_clears_the_team(self):
+        """'Make this private' is unambiguous and should just work."""
+        note = self._shared_note()
+        response = self.client.patch(
+            reverse("note-detail", args=[note.pk]), {"visibility": "private"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data["team"])
+
+        note.refresh_from_db()
+        self.assertEqual(note.visibility, Note.Visibility.PRIVATE)
+        self.assertIsNone(note.team)
+
+    def test_private_paired_with_a_team_is_still_rejected(self):
+        """Asking for both halves of a contradiction is still an error."""
+        note = self._shared_note()
+        response = self.client.patch(
+            reverse("note-detail", args=[note.pk]),
+            {"visibility": "private", "team": self.team.slug},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("team", response.data)
+
+    def test_setting_a_team_without_visibility_is_rejected(self):
+        """Ambiguous: did they mean to share it, or is this a mistake?"""
+        note = make_note(self.ada, title="Private")
+        response = self.client.patch(
+            reverse("note-detail", args=[note.pk]), {"team": self.team.slug}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_unshare_then_reshare_round_trips(self):
+        note = self._shared_note()
+        url = reverse("note-detail", args=[note.pk])
+
+        self.assertEqual(self.client.patch(url, {"visibility": "private"}).status_code, 200)
+        reshared = self.client.patch(
+            url, {"visibility": "team", "team": self.team.slug}
+        )
+        self.assertEqual(reshared.status_code, 200)
+        self.assertEqual(reshared.data["team"], self.team.slug)
+
+    def test_unsharing_revokes_a_teammates_access(self):
+        grace = make_user("grace")
+        Membership.objects.create(team=self.team, user=grace)
+        note = self._shared_note()
+
+        self.assertEqual(client_for(grace).get(reverse("note-detail", args=[note.pk])).status_code, 200)
+        self.client.patch(reverse("note-detail", args=[note.pk]), {"visibility": "private"})
+        self.assertEqual(client_for(grace).get(reverse("note-detail", args=[note.pk])).status_code, 404)
