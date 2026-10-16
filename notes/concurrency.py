@@ -15,6 +15,11 @@ Two notes on the choices here:
   nothing on a note only one person can reach. The moment a note is
   shared with a team, concurrent editors become possible and a blind
   write is no longer safe -- so that is where the requirement starts.
+
+* The version travels in the header, never in the body. It describes the
+  request rather than the note, and mixing it into the payload invites a
+  client to treat it as a writable field. `If-Match` is the header HTTP
+  already has for this, so there is no reason to invent one.
 """
 
 from rest_framework import status
@@ -27,7 +32,8 @@ class PreconditionRequired(APIException):
     status_code = status.HTTP_428_PRECONDITION_REQUIRED
     default_detail = (
         "This note is shared with a team, so an If-Match header carrying the "
-        "version you last read is required. GET the note to obtain it."
+        "version you last read is required. GET the note and use the ETag "
+        "it returns. A version in the request body is not accepted."
     )
     default_code = "precondition_required"
 
@@ -61,19 +67,10 @@ def parse_if_match(raw: str | None) -> int | None:
 def expected_version_for(request, note: Note) -> int | None:
     """Work out which version this write must match, if any.
 
-    Looks at the If-Match header first, then a `version` field in the
-    body for clients that cannot set headers easily. Raises 428 when a
-    shared note is written without either.
+    The If-Match header is the only source. Raises 428 when a shared note
+    is written without one.
     """
     expected = parse_if_match(request.headers.get("If-Match"))
-
-    if expected is None:
-        body_version = request.data.get("version") if hasattr(request, "data") else None
-        if body_version is not None:
-            try:
-                expected = int(body_version)
-            except (TypeError, ValueError):
-                expected = None
 
     if expected is None and note.visibility == Note.Visibility.TEAM:
         raise PreconditionRequired()

@@ -111,14 +111,19 @@ class PreconditionRequirementTests(APITestCase):
         )
         self.assertEqual(response.status_code, 200)
 
-    def test_version_may_be_sent_in_the_body_instead_of_a_header(self):
-        """For clients that cannot set headers easily."""
+    def test_a_version_in_the_body_does_not_satisfy_the_precondition(self):
+        """The header is the only channel. A version in the payload is
+        ignored, so this is still a blind write."""
         note = make_note(self.ada, title="Shared", team=self.team)
         response = self.client.patch(
             reverse("note-detail", args=[note.pk]),
             {"body": "via body", "version": note.version},
         )
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 428)
+
+        note.refresh_from_db()
+        self.assertEqual(note.body, "")
+        self.assertEqual(note.version, 1)
 
     def test_weak_etag_and_bare_integer_are_both_accepted(self):
         note = make_note(self.ada, title="Shared", team=self.team)

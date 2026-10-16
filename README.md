@@ -174,6 +174,22 @@ note only one person can reach, so the requirement starts exactly where
 concurrent editors become possible. You can still opt in on a private
 note, and it is honoured.
 
+**The version travels in the header, never the body.** `ETag` on the way
+out, `If-Match` on the way in:
+
+```bash
+curl -sD- -o/dev/null -H "Authorization: Token $TOKEN" "$API/notes/5/" | grep -i etag
+#   ETag: "2"
+
+curl -X PATCH "$API/notes/5/" -H "Authorization: Token $TOKEN" \
+     -H 'Content-Type: application/json' -H 'If-Match: "2"' \
+     -d '{"body":"milk\nbread"}'
+```
+
+It describes the request, not the note, and putting it in the payload
+invites a client to treat it as a writable field. `W/"2"` and a bare `2`
+are both accepted; a `version` in the body is ignored.
+
 **The 409 carries the current state.** A bare rejection makes the user
 retype from memory, so the response includes `your_version`,
 `current_version` and the full current note, which is enough for a client
