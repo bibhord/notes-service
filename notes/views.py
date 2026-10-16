@@ -1,9 +1,10 @@
 from django.contrib.auth import get_user_model
 from django.db.models import Count, Prefetch
+from django.db.models.deletion import ProtectedError
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions
 from rest_framework.authtoken.models import Token
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.response import Response
 
 from .concurrency import etag_for, expected_version_for
@@ -11,6 +12,7 @@ from .filters import NoteFilter
 from .models import Membership, Note, NoteRevision, Team, VersionConflict
 from .permissions import CanEditNote, IsTeamAdmin
 from .serializers import (
+    MembershipRoleSerializer,
     MembershipSerializer,
     NoteRevisionSerializer,
     NoteSerializer,
@@ -20,6 +22,12 @@ from .serializers import (
 )
 
 User = get_user_model()
+
+
+class Conflict(APIException):
+    status_code = 409
+    default_detail = "That change conflicts with the current state."
+    default_code = "conflict"
 
 
 class RegisterView(generics.CreateAPIView):
@@ -82,6 +90,24 @@ class TeamDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated, IsTeamAdmin]
     lookup_field = "slug"
 
+    def perform_destroy(self, instance):
+        """Refuse to delete a team that still holds notes.
+
+        Cascading would destroy other people's notes with no undo, which
+        no other delete in this service does. Move or delete the notes
+        first; the decision belongs to their authors, not to whoever
+        happens to be a team admin today.
+        """
+        try:
+            instance.delete()
+        except ProtectedError:
+            remaining = Note.objects.filter(team=instance).count()
+            raise Conflict(
+                f"This team still holds {remaining} "
+                f"note{'' if remaining == 1 else 's'}. Move or delete them "
+                "before deleting the team."
+            )
+
     def get_queryset(self):
         return (
             Team.objects.filter(memberships__user=self.request.user)
@@ -120,10 +146,16 @@ class MembershipListCreateView(generics.ListCreateAPIView):
         return super().create(request, *args, **kwargs)
 
 
-class MembershipDetailView(generics.DestroyAPIView):
-    """Remove someone from a team. Admins only, and never the last admin."""
+class MembershipDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """Change someone's role, or remove them.
 
-    serializer_class = MembershipSerializer
+    Admins manage other people. Anyone may remove themselves, because a
+    team you cannot leave is a trap -- but not if they are the last admin,
+    which would strand the team with nobody able to manage it.
+    """
+
+    serializer_class = MembershipRoleSerializer
+    http_method_names = ["get", "patch", "delete", "head", "options"]
 
     def get_object(self):
         team = get_object_or_404(
@@ -136,12 +168,37 @@ class MembershipDetailView(generics.DestroyAPIView):
             user__username=self.kwargs["username"],
         )
 
-    def perform_destroy(self, instance):
-        caller_is_admin = Membership.objects.filter(
-            team=instance.team, user=self.request.user, role=Membership.Role.ADMIN
-        ).exists()
-        if not caller_is_admin:
+    def _require_admin(self):
+        if not Membership.objects.filter(
+            team=self.get_object().team,
+            user=self.request.user,
+            role=Membership.Role.ADMIN,
+        ).exists():
             raise PermissionDenied("You must be an admin of this team.")
+
+    def perform_update(self, serializer):
+        self._require_admin()
+        instance = serializer.instance
+        new_role = serializer.validated_data.get("role", instance.role)
+
+        if instance.is_admin and new_role != Membership.Role.ADMIN:
+            others = (
+                Membership.objects.filter(
+                    team=instance.team, role=Membership.Role.ADMIN
+                )
+                .exclude(pk=instance.pk)
+                .count()
+            )
+            if others == 0:
+                raise ValidationError(
+                    "Demoting this member would leave the team with no admin."
+                )
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        leaving_voluntarily = instance.user_id == self.request.user.id
+        if not leaving_voluntarily:
+            self._require_admin()
 
         if instance.is_admin:
             remaining_admins = (
@@ -251,7 +308,12 @@ class NoteDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class NoteTrashView(generics.ListAPIView):
-    """Notes the caller deleted, so they can find one to restore."""
+    """Deleted notes the caller is able to bring back.
+
+    Authors see their own. Team admins also see notes deleted out of their
+    team, since they are allowed to delete those -- being able to remove
+    something you cannot put back is not a useful power.
+    """
 
     serializer_class = NoteSerializer
     ordering = ["-deleted_at"]
@@ -259,7 +321,7 @@ class NoteTrashView(generics.ListAPIView):
     def get_queryset(self):
         return (
             Note.objects.deleted()
-            .filter(author=self.request.user)
+            .manageable_by(self.request.user)
             .select_related("author", "team")
         )
 
@@ -268,7 +330,7 @@ class NoteRestoreView(generics.GenericAPIView):
     serializer_class = NoteSerializer
 
     def get_queryset(self):
-        return Note.objects.deleted().filter(author=self.request.user)
+        return Note.objects.deleted().manageable_by(self.request.user)
 
     def post(self, request, *args, **kwargs):
         note = get_object_or_404(self.get_queryset(), pk=self.kwargs["pk"])

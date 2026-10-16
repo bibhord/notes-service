@@ -1,7 +1,7 @@
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
-from notes.models import Membership
+from notes.models import Membership, Team
 
 from .factories import client_for, make_team, make_user
 
@@ -91,3 +91,80 @@ class MembershipTests(APITestCase):
             reverse("membership-list", args=[self.team.slug])
         )
         self.assertEqual(response.status_code, 404)
+
+
+class TeamDeletionTests(APITestCase):
+    """Deleting a team used to cascade and hard-delete every note in it,
+    including other people's, with no undo."""
+
+    def setUp(self):
+        self.ada = make_user("ada")
+        self.grace = make_user("grace")
+        self.team = make_team("One", admin=self.ada, members=[self.grace])
+        self.url = reverse("team-detail", args=[self.team.slug])
+
+    def test_deleting_a_team_with_notes_is_refused(self):
+        from notes.models import Note
+
+        from .factories import make_note
+
+        make_note(self.grace, title="Grace's work", team=self.team)
+
+        response = client_for(self.ada).delete(self.url)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(Note.objects.count(), 1)
+        self.assertTrue(Team.objects.filter(pk=self.team.pk).exists())
+
+    def test_a_soft_deleted_note_still_blocks_deletion(self):
+        """It is in the trash, not gone. Deleting the team would make it
+        unrecoverable."""
+        from .factories import make_note
+
+        note = make_note(self.grace, title="trashed", team=self.team)
+        note.soft_delete()
+
+        self.assertEqual(client_for(self.ada).delete(self.url).status_code, 409)
+
+    def test_an_empty_team_can_be_deleted(self):
+        response = client_for(self.ada).delete(self.url)
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Team.objects.filter(pk=self.team.pk).exists())
+
+
+class LeavingAndRolesTests(APITestCase):
+    def setUp(self):
+        self.ada = make_user("ada")
+        self.grace = make_user("grace")
+        self.team = make_team("One", admin=self.ada, members=[self.grace])
+
+    def _url(self, username):
+        return reverse("membership-detail", args=[self.team.slug, username])
+
+    def test_a_member_can_remove_themselves(self):
+        """A team you cannot leave is a trap."""
+        response = client_for(self.grace).delete(self._url("grace"))
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(
+            Membership.objects.filter(team=self.team, user=self.grace).exists()
+        )
+
+    def test_the_last_admin_cannot_leave(self):
+        response = client_for(self.ada).delete(self._url("ada"))
+        self.assertEqual(response.status_code, 400)
+
+    def test_an_admin_can_leave_once_another_admin_exists(self):
+        Membership.objects.filter(team=self.team, user=self.grace).update(role="admin")
+        self.assertEqual(client_for(self.ada).delete(self._url("ada")).status_code, 204)
+
+    def test_admin_can_promote_a_member(self):
+        response = client_for(self.ada).patch(self._url("grace"), {"role": "admin"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["role"], "admin")
+
+    def test_a_member_cannot_promote_themselves(self):
+        response = client_for(self.grace).patch(self._url("grace"), {"role": "admin"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_the_last_admin_cannot_be_demoted(self):
+        response = client_for(self.ada).patch(self._url("ada"), {"role": "member"})
+        self.assertEqual(response.status_code, 400)

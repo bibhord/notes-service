@@ -41,9 +41,10 @@ All endpoints except register and token require `Authorization: Token <key>`.
 | POST | `/api/auth/token/` | Exchange username + password for a token |
 | GET | `/api/me/` | The current user |
 | GET, POST | `/api/teams/` | Your teams / create one (you become admin) |
-| GET, PATCH, DELETE | `/api/teams/{slug}/` | One team (writes are admin-only) |
+| GET, PATCH, DELETE | `/api/teams/{slug}/` | One team (writes are admin-only; DELETE 409s if it holds notes) |
 | GET, POST | `/api/teams/{slug}/members/` | Members / add one (admin-only) |
-| DELETE | `/api/teams/{slug}/members/{username}/` | Remove a member (admin-only) |
+| PATCH | `/api/teams/{slug}/members/{username}/` | Change a member's role (admin-only) |
+| DELETE | `/api/teams/{slug}/members/{username}/` | Remove a member (admins, or yourself) |
 | GET, POST | `/api/notes/` | Notes you can see / create one |
 | GET, PATCH, DELETE | `/api/notes/{id}/` | One note (DELETE is a soft delete) |
 | GET | `/api/notes/{id}/revisions/` | Every saved version of a note |
@@ -60,7 +61,7 @@ curl -H "Authorization: Token $TOKEN" \
 
 ---
 
-## The three things I spent the most time on
+## The three design decisions I spent the most time on
 
 ### 1. Authorization lives in the queryset, not in the view
 
@@ -126,25 +127,34 @@ A future bulk update or a management command cannot create a note that claims
 to be shared with nobody. Validation in the serializer catches the API path;
 the constraint catches every other path there will ever be.
 
-### 3. Delete does not delete
+### 3. Not losing people's work
 
-`DELETE /api/notes/{id}/` sets `deleted_at`. The row stays. `/notes/trash/`
-lists what you deleted and `/notes/{id}/restore/` puts it back.
+Notes are the product, so every way a note can disappear gets a deliberate
+answer. There are four, and they are the same decision applied four times.
 
-Notes are the product. Losing one to a mis-click is a much worse outcome than
-carrying dead rows in a table, and the storage cost of text is not a real cost.
+**Delete does not delete.** `DELETE /api/notes/{id}/` sets `deleted_at` and
+leaves the row. `/notes/trash/` lists what was deleted, `/notes/{id}/restore/`
+puts it back. Storage for text is not a real cost; losing a note to a mis-click
+is. Trash and restore are scoped to who may *manage* a note, which is wider
+than authorship — a team admin can delete a member's note, so they can also
+restore it. Being able to remove something you cannot put back is not a useful
+power.
 
 What I deliberately did **not** do is make the default manager hide deleted
 rows. That trick is convenient right up to the first time you need to find a
-deleted record and cannot work out why your query returns nothing. Instead
-`Note.objects` returns everything and callers say `.alive()` or `.deleted()`.
-Slightly more typing, no surprises.
+deleted record and cannot work out why your query returns nothing. `Note.objects`
+returns everything; callers say `.alive()` or `.deleted()`.
 
-### 4. Two people editing the same note
+**Deleting a team does not delete its notes.** The FK is `PROTECT`, not
+`CASCADE`. Cascading let one team admin destroy every note in the team,
+including other people's, with no undo — the exact thing the rest of this
+design refuses to do. The API returns **409** naming how many notes are in the
+way. A note in the trash still blocks it, because it is recoverable and
+deleting the team would end that.
 
-Notes are shared, so two teammates will eventually save the same note at
-the same time. With a plain `UPDATE` the second write wins and the first
-person's change is gone, with no error and nothing in the logs:
+**Concurrent edits are detected, not resolved by luck.** Two teammates saving
+the same note used to mean the second write won and the first change vanished
+silently:
 
 ```
 ada    GET   note 5  -> "milk"
@@ -153,9 +163,8 @@ ada    PATCH "milk\nbread"    -> 200
 grace  PATCH "milk\ncoffee"   -> 200    (bread is gone, silently)
 ```
 
-Each note carries an integer `version`, served as an `ETag`. A write sends
-back the version it last read in `If-Match`, and the update is a single
-conditional statement:
+Each note carries an integer `version`, served as an `ETag`. A write sends it
+back in `If-Match`, and the update is a single conditional statement:
 
 ```python
 rows = Note.objects.filter(pk=self.pk, version=expected_version).update(
@@ -165,52 +174,40 @@ if rows == 0:
     raise VersionConflict(...)
 ```
 
-Matching and incrementing in one statement is the whole point. A `SELECT`
-followed by an `UPDATE` leaves a window for another writer to land in
-between; this has no window.
+Matching and incrementing in one statement is the whole point. A `SELECT` then
+an `UPDATE` leaves a window for another writer to land in between; this has
+none.
 
 Three decisions inside that:
 
-**An integer, not `updated_at`.** Timestamps have precision limits, clocks
-can move backwards, and two writes in the same microsecond compare equal.
-A counter has none of those problems. `ETag` / `If-Match` is just the
-standard HTTP spelling of it.
+*An integer, not `updated_at`.* Timestamps have precision limits, clocks can
+move backwards, and two writes in the same microsecond compare equal.
 
-**Shared notes require the precondition; private ones do not.** A blind
-write to a team note returns **428 Precondition Required**. Making every
-client read before every write costs a round trip and buys nothing on a
-note only one person can reach, so the requirement starts exactly where
-concurrent editors become possible. You can still opt in on a private
-note, and it is honoured.
+*The version travels in the header.* `ETag` out, `If-Match` in. It describes
+the request, not the note, and putting it in the payload invites a client to
+treat it as a writable field. `W/"2"`, a bare `2` and `*` are all accepted; a
+`version` in the body is ignored. A header that is present but unparseable is
+a **400**, not a 428 — telling someone they forgot a header they did send
+sends them hunting in the wrong place.
 
-**The version travels in the header, never the body.** `ETag` on the way
-out, `If-Match` on the way in:
+*Shared notes require it; private ones do not.* A blind write to a team note
+is **428 Precondition Required**. Requiring a read before every write costs a
+round trip and buys nothing on a note one person can reach, so the requirement
+starts exactly where concurrent editors become possible.
 
-```bash
-curl -sD- -o/dev/null -H "Authorization: Token $TOKEN" "$API/notes/5/" | grep -i etag
-#   ETag: "2"
+**Every save is kept.** A `NoteRevision` row per write, so an overwritten
+paragraph is recoverable and "who changed this" is answerable. It is also what
+makes the 409 useful: the conflict response carries `your_version`,
+`current_version` and the full current note, which is enough for a client to
+show a diff instead of making someone retype from memory. Full snapshots
+rather than diffs — note bodies are small, and reading any revision is then one
+row with no replay. History is scoped through the same `visible_to()` queryset
+as the note, so it cannot be read by anyone who cannot read the note.
 
-curl -X PATCH "$API/notes/5/" -H "Authorization: Token $TOKEN" \
-     -H 'Content-Type: application/json' -H 'If-Match: "2"' \
-     -d '{"body":"milk\nbread"}'
-```
-
-It describes the request, not the note, and putting it in the payload
-invites a client to treat it as a writable field. `W/"2"` and a bare `2`
-are both accepted; a `version` in the body is ignored.
-
-**The 409 carries the current state.** A bare rejection makes the user
-retype from memory, so the response includes `your_version`,
-`current_version` and the full current note, which is enough for a client
-to show a diff. That is also why every save writes a `NoteRevision` row:
-without history, a conflict response has nothing to merge against and an
-overwritten paragraph is simply gone.
-
-What this deliberately does not do is let two people type into one note
-simultaneously. That needs operational transforms or a CRDT, a persistent
-connection, and a different storage model for the body. For a team
-note-taking app, conflict detection plus history is the right stopping
-point.
+What this deliberately does not do is let two people type into one note at
+once. That needs operational transforms or a CRDT, a persistent connection and
+a different storage model for the body. For a team note-taking app, conflict
+detection plus history is the right stopping point.
 
 ---
 
@@ -278,6 +275,9 @@ what does every verb return?
 - Visibility and team must agree, in both directions
 - A team cannot be left without an admin
 - Only the author can re-share or un-share a note; members can still edit its text
+- Deleting a team holding notes is refused, rather than destroying them
+- Someone removed from a team keeps their own notes readable *and* editable
+- Anyone can leave a team, except the last admin, who would strand it
 
 `notes/tests/test_concurrency.py` interleaves two clients on one note and
 asserts the second write is refused rather than winning, that the conflict

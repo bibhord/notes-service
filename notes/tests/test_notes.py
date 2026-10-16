@@ -1,7 +1,7 @@
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
-from notes.models import Note
+from notes.models import Membership, Note
 
 from .factories import client_for, make_note, make_team, make_user
 
@@ -107,3 +107,71 @@ class SearchAndFilterTests(APITestCase):
         self.assertEqual(len(response.data["results"]), 2)
         self.assertEqual(response.data["count"], 3)
         self.assertIsNotNone(response.data["next"])
+
+
+class ExMemberTests(APITestCase):
+    """Someone removed from a team keeps their own notes usable."""
+
+    def setUp(self):
+        self.ada = make_user("ada")
+        self.grace = make_user("grace")
+        self.team = make_team("One", admin=self.ada, members=[self.grace])
+        self.note = make_note(self.grace, title="Grace's", body="v1", team=self.team)
+        Membership.objects.filter(team=self.team, user=self.grace).delete()
+
+    def test_ex_member_can_still_read_their_own_note(self):
+        response = client_for(self.grace).get(
+            reverse("note-detail", args=[self.note.pk])
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_ex_member_can_still_edit_their_own_note(self):
+        """Readable but not editable was the inconsistency."""
+        self.note.refresh_from_db()
+        response = client_for(self.grace).patch(
+            reverse("note-detail", args=[self.note.pk]),
+            {"body": "v2"},
+            HTTP_IF_MATCH=f'"{self.note.version}"',
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_ex_member_cannot_put_a_new_note_in_that_team(self):
+        response = client_for(self.grace).post(
+            reverse("note-list"),
+            {"title": "new", "visibility": "team", "team": self.team.slug},
+        )
+        self.assertEqual(response.status_code, 400)
+
+
+class AdminRestoreTests(APITestCase):
+    """A team admin may delete a member's note, so they must be able to
+    put it back."""
+
+    def setUp(self):
+        self.ada = make_user("ada")
+        self.grace = make_user("grace")
+        self.team = make_team("One", admin=self.ada, members=[self.grace])
+        self.note = make_note(self.grace, title="Grace's", team=self.team)
+
+    def test_admin_can_restore_a_note_they_deleted(self):
+        admin = client_for(self.ada)
+        self.assertEqual(
+            admin.delete(reverse("note-detail", args=[self.note.pk])).status_code, 204
+        )
+        self.assertEqual(
+            admin.post(reverse("note-restore", args=[self.note.pk])).status_code, 200
+        )
+
+    def test_admin_sees_the_teams_deleted_notes_in_trash(self):
+        self.note.soft_delete()
+        response = client_for(self.ada).get(reverse("note-trash"))
+        self.assertEqual(response.data["count"], 1)
+
+    def test_a_plain_member_cannot_restore_someone_elses_note(self):
+        self.note.soft_delete()
+        other = make_user("mallory")
+        Membership.objects.create(team=self.team, user=other)
+        response = client_for(other).post(
+            reverse("note-restore", args=[self.note.pk])
+        )
+        self.assertEqual(response.status_code, 404)

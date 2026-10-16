@@ -206,3 +206,29 @@ class RevisionTests(APITestCase):
         note = Note.objects.get(pk=response.data["id"])
         self.assertEqual(note.revisions.count(), 1)
         self.assertEqual(note.revisions.first().version, 1)
+
+
+class IfMatchParsingTests(APITestCase):
+    def setUp(self):
+        self.ada = make_user("ada")
+        self.client = client_for(self.ada)
+        self.team = make_team("Platform", admin=self.ada)
+        self.note = make_note(self.ada, title="Shared", team=self.team)
+        self.url = reverse("note-detail", args=[self.note.pk])
+
+    def test_malformed_if_match_is_a_400_not_a_428(self):
+        """428 would send the caller hunting for a header they did send."""
+        response = self.client.patch(
+            self.url, {"body": "x"}, HTTP_IF_MATCH="banana"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("If-Match", response.data)
+
+    def test_star_satisfies_the_precondition_without_pinning_a_version(self):
+        """`*` means 'only if it exists', which is a real precondition."""
+        response = self.client.patch(self.url, {"body": "x"}, HTTP_IF_MATCH="*")
+        self.assertEqual(response.status_code, 200)
+
+    def test_empty_if_match_is_treated_as_absent(self):
+        response = self.client.patch(self.url, {"body": "x"}, HTTP_IF_MATCH="   ")
+        self.assertEqual(response.status_code, 428)

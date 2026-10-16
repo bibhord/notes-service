@@ -155,7 +155,16 @@ class NoteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"team": "A team note must specify a team."}
                 )
-            if not Membership.objects.filter(team=team, user=user).exists():
+            # Membership is checked when a note is pointed at a team, not on
+            # every subsequent edit. Someone who leaves a team keeps their
+            # own notes readable (they are the author) and editable; what
+            # they lose is the ability to put anything new there. Re-checking
+            # on every write left ex-members able to read a note they could
+            # no longer fix.
+            team_is_changing = instance is None or team != instance.team
+            if team_is_changing and not Membership.objects.filter(
+                team=team, user=user
+            ).exists():
                 raise serializers.ValidationError(
                     {"team": "You are not a member of that team."}
                 )
@@ -176,3 +185,15 @@ class NoteRevisionSerializer(serializers.ModelSerializer):
         model = NoteRevision
         fields = ["id", "version", "title", "body", "edited_by", "created_at"]
         read_only_fields = fields
+
+
+class MembershipRoleSerializer(serializers.ModelSerializer):
+    """Promote or demote an existing member. Role is the only field a
+    membership has that can meaningfully change."""
+
+    user = UserSerializer(read_only=True)
+
+    class Meta:
+        model = Membership
+        fields = ["id", "user", "role", "joined_at"]
+        read_only_fields = ["id", "user", "joined_at"]

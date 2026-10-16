@@ -23,9 +23,14 @@ Two notes on the choices here:
 """
 
 from rest_framework import status
-from rest_framework.exceptions import APIException
+from rest_framework.exceptions import APIException, ValidationError
 
 from .models import Note
+
+#: `If-Match: *` means "only if this resource exists", which is a real
+#: precondition but constrains no particular version. Distinct from a
+#: missing header, which is no precondition at all.
+ANY_VERSION = object()
 
 
 class PreconditionRequired(APIException):
@@ -42,26 +47,35 @@ def etag_for(note: Note) -> str:
     return f'"{note.version}"'
 
 
-def parse_if_match(raw: str | None) -> int | None:
+def parse_if_match(raw: str | None):
     """Pull a version out of an If-Match header.
 
     Accepts `"7"`, `W/"7"` and a bare `7`. Returns None for a missing
-    header or `*`, which means "any current version" and so imposes no
-    constraint. A malformed value returns None rather than raising: it is
-    the caller's job to decide whether a missing precondition is fatal.
+    header and ANY_VERSION for `*`.
+
+    A header that is present but unparseable raises 400. Reporting it as
+    428 ("you did not send a precondition") sends the caller looking for
+    a missing header they did in fact send.
     """
-    if not raw:
+    if raw is None or not raw.strip():
         return None
     value = raw.strip()
     if value == "*":
-        return None
+        return ANY_VERSION
     if value.startswith("W/"):
         value = value[2:]
     value = value.strip('"')
     try:
         return int(value)
     except ValueError:
-        return None
+        raise ValidationError(
+            {
+                "If-Match": (
+                    f"Could not read a version from {raw!r}. Expected the "
+                    'ETag from a GET of this note, such as If-Match: "3".'
+                )
+            }
+        )
 
 
 def expected_version_for(request, note: Note) -> int | None:
@@ -74,5 +88,10 @@ def expected_version_for(request, note: Note) -> int | None:
 
     if expected is None and note.visibility == Note.Visibility.TEAM:
         raise PreconditionRequired()
+
+    if expected is ANY_VERSION:
+        # The caller asked only that the note still exist, which getting
+        # this far already proves. No version constraint.
+        return None
 
     return expected

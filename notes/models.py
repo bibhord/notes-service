@@ -103,6 +103,23 @@ class NoteQuerySet(models.QuerySet):
             Q(author=user) | Q(visibility=Note.Visibility.TEAM, team_id__in=team_ids)
         )
 
+    def manageable_by(self, user):
+        """Notes this user may delete or restore.
+
+        Wider than authorship: a team admin can remove a member's note from
+        the team's space, so they must be able to put it back. Narrower than
+        visible_to(), which includes notes you can merely read.
+        """
+        if not user.is_authenticated:
+            return self.none()
+        admin_team_ids = Membership.objects.filter(
+            user=user, role=Membership.Role.ADMIN
+        ).values("team_id")
+        return self.filter(
+            Q(author=user)
+            | Q(visibility=Note.Visibility.TEAM, team_id__in=admin_team_ids)
+        )
+
     def search(self, term: str):
         """Case-insensitive substring match over title and body.
 
@@ -129,7 +146,11 @@ class Note(models.Model):
     )
     team = models.ForeignKey(
         Team,
-        on_delete=models.CASCADE,
+        # PROTECT, not CASCADE. Deleting a team used to hard-delete every
+        # note in it, including other people's, with no undo -- which flatly
+        # contradicts the rest of this service never destroying a note. The
+        # database now refuses, and the API turns that into a 409.
+        on_delete=models.PROTECT,
         related_name="notes",
         null=True,
         blank=True,
